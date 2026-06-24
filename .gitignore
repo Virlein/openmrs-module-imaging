@@ -34,3 +34,7 @@ __pycache__/
 e2e_run_test_tool.log
 e2e_test_tool.log
 example_instance.dcm
+target/
+*.omod
+*.jar
+*.class
