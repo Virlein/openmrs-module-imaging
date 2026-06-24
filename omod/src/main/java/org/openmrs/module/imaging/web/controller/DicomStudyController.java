@@ -201,7 +201,7 @@ public class DicomStudyController {
         DicomStudyService dicomStudyService = Context.getService(DicomStudyService.class);
 
         try {
-            if (fetchOption.equals("all")) {
+            if (fetchOption.equalsIgnoreCase("all")) {
                 dicomStudyService.fetchAllStudies(configuration);
             } else {
                 dicomStudyService.fetchNewChangedStudiesByConfiguration(configuration);

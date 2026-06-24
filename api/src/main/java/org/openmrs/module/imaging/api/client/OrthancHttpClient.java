@@ -1,20 +1,8 @@
-/**
- * The contents of this file are subject to the OpenMRS Public License
- * Version 1.0 (the "License"); you may not use this file except in
- * compliance with the License. You may obtain a copy of the License at
- * http://license.openmrs.org
- *
- * Software distributed under the License is distributed on an "AS IS"
- * basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See the
- * License for the specific language governing rights and limitations
- * under the License.
- *
- * Copyright (C) OpenMRS, LLC.  All Rights Reserved.
- */
-
 package org.openmrs.module.imaging.api.client;
 
 import org.apache.commons.io.IOUtils;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 import org.openmrs.module.imaging.OrthancConfiguration;
 
 import java.io.*;
@@ -24,38 +12,101 @@ import java.util.Base64;
 
 public class OrthancHttpClient {
 	
+	protected final Log log = LogFactory.getLog(this.getClass());
+	
+	private String cachedToken = null;
+	
+	private long tokenExpiry = 0;
+	
+	/**
+	 * Fetch a Keycloak token using client credentials. username = Keycloak client ID, password =
+	 * Keycloak client secret The Keycloak URL is derived from the orthancBaseUrl pattern or set via
+	 * global property.
+	 */
+	private String getKeycloakToken(OrthancConfiguration config) throws IOException {
+        // Check cached token
+        if (cachedToken != null && System.currentTimeMillis() < tokenExpiry) {
+            return cachedToken;
+        }
+
+        // Get Keycloak URL from OpenMRS global property or use default
+        String keycloakUrl = System.getProperty("imaging.keycloak.url",
+            "http://keycloak:8080/realms/ozone/protocol/openid-connect/token");
+
+        String clientId = config.getOrthancUsername();
+        String clientSecret = config.getOrthancPassword();
+
+        String formData = "grant_type=client_credentials"
+            + "&client_id=" + URLEncoder.encode(clientId, "UTF-8")
+            + "&client_secret=" + URLEncoder.encode(clientSecret, "UTF-8");
+
+        URL url = new URL(keycloakUrl);
+        HttpURLConnection con = (HttpURLConnection) url.openConnection();
+        con.setRequestMethod("POST");
+        con.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+        con.setDoOutput(true);
+
+        try (DataOutputStream wr = new DataOutputStream(con.getOutputStream())) {
+            wr.write(formData.getBytes(StandardCharsets.UTF_8));
+        }
+
+        int status = con.getResponseCode();
+        if (status != 200) {
+            throw new IOException("Failed to get Keycloak token, status: " + status);
+        }
+
+        String response = IOUtils.toString(con.getInputStream(), StandardCharsets.UTF_8);
+        // Parse access_token from JSON manually
+        int start = response.indexOf("\"access_token\":\"") + 16;
+        int end = response.indexOf("\"", start);
+        cachedToken = response.substring(start, end);
+
+        // Cache for 4 minutes (tokens usually valid 5 minutes)
+        tokenExpiry = System.currentTimeMillis() + (4 * 60 * 1000);
+
+        log.info("Successfully obtained Keycloak token for Orthanc access");
+        return cachedToken;
+    }
+	
 	public HttpURLConnection createConnection(String method, String url, String path, String username, String password)
 	        throws IOException {
-		String encoding = Base64.getEncoder().encodeToString((username + ":" + password).getBytes());
-		URL serverURL = URI.create(url).resolve(path).toURL();
+		// Create a temporary config to get token
+		OrthancConfiguration tempConfig = new OrthancConfiguration();
+		tempConfig.setOrthancUsername(username);
+		tempConfig.setOrthancPassword(password);
+		return createConnectionWithConfig(method, url, path, tempConfig);
+	}
+	
+	public HttpURLConnection createConnectionWithConfig(String method, String baseUrl, String path,
+	        OrthancConfiguration config) throws IOException {
+		URL serverURL = URI.create(baseUrl).resolve(path).toURL();
 		HttpURLConnection con = (HttpURLConnection) serverURL.openConnection();
 		con.setRequestMethod(method);
-		con.setRequestProperty("Authorization", "Basic " + encoding);
 		con.setUseCaches(false);
+		try {
+			String token = getKeycloakToken(config);
+			con.setRequestProperty("token", token);
+		}
+		catch (Exception e) {
+			log.warn("Failed to get Keycloak token, falling back to Basic Auth: " + e.getMessage());
+			String auth = config.getOrthancUsername() + ":" + config.getOrthancPassword();
+			String encoded = Base64.getEncoder().encodeToString(auth.getBytes(StandardCharsets.UTF_8));
+			con.setRequestProperty("Authorization", "Basic " + encoded);
+		}
 		return con;
 	}
 	
-	/**
-	 * @param con http url request connection
-	 * @param query the query string
-	 * @throws IOException IO exception
-	 */
 	public void sendOrthancQuery(HttpURLConnection con, String query) throws IOException {
         con.setRequestProperty("Content-Type", "application/json; charset=UTF-8");
-        con.setRequestProperty( "charset", "utf-8");
+        con.setRequestProperty("charset", "utf-8");
         con.setDoOutput(true);
         byte[] data = query.getBytes(StandardCharsets.UTF_8);
-        con.setRequestProperty( "Content-Length", Integer.toString(data.length));
-        try(DataOutputStream wr = new DataOutputStream(con.getOutputStream())) {
+        con.setRequestProperty("Content-Length", Integer.toString(data.length));
+        try (DataOutputStream wr = new DataOutputStream(con.getOutputStream())) {
             wr.write(data);
         }
     }
 	
-	/**
-	 * @param config the orthanc server configuration
-	 * @param con the http url connection
-	 * @throws IOException the IO exception
-	 */
 	public static void throwConnectionException(OrthancConfiguration config, HttpURLConnection con) throws IOException {
 		String errorMessage;
 		try {
@@ -69,27 +120,15 @@ public class OrthancHttpClient {
 		catch (IOException e) {
 			errorMessage = "Failed to read error stream: " + e.getMessage();
 		}
-		
 		throw new IOException("Request to Orthanc server " + config.getOrthancBaseUrl() + " failed with error: "
 		        + errorMessage);
 	}
 	
-	/**
-	 * @param config
-	 * @return
-	 */
 	public boolean isOrthancReachable(OrthancConfiguration config) {
 		try {
-			URL url = new URL(config.getOrthancBaseUrl() + "/system"); // `/system` is a common endpoint in Orthanc
-			HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-			connection.setRequestMethod("GET");
-			connection.setConnectTimeout(3000); // 3 seconds timeout
+			HttpURLConnection connection = createConnectionWithConfig("GET", config.getOrthancBaseUrl(), "/system", config);
+			connection.setConnectTimeout(3000);
 			connection.setReadTimeout(3000);
-			
-			String auth = config.getOrthancUsername() + ":" + config.getOrthancPassword();
-			String encodeAuth = Base64.getEncoder().encodeToString(auth.getBytes(StandardCharsets.UTF_8));
-			connection.setRequestProperty("Authorization", "Basic " + encodeAuth);
-			
 			int responseCode = connection.getResponseCode();
 			return responseCode == 200;
 		}
@@ -98,15 +137,11 @@ public class OrthancHttpClient {
 		}
 	}
 	
-	/**
-	 * @param url the Url
-	 * @param username the user name
-	 * @param password the password
-	 * @return the response status
-	 * @throws IOException the IO exception
-	 */
 	public int testOrthancConnection(String url, String username, String password) throws IOException {
-		HttpURLConnection con = createConnection("GET", url, "/system", username, password);
+		OrthancConfiguration tempConfig = new OrthancConfiguration();
+		tempConfig.setOrthancUsername(username);
+		tempConfig.setOrthancPassword(password);
+		HttpURLConnection con = createConnectionWithConfig("GET", url, "/system", tempConfig);
 		int status = con.getResponseCode();
 		con.disconnect();
 		return status;
