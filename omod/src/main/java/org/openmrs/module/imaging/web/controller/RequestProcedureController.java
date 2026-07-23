@@ -25,10 +25,6 @@ import org.openmrs.api.context.Context;
 import org.openmrs.module.imaging.OrthancConfiguration;
 import org.openmrs.module.imaging.api.DicomStudyService;
 import org.openmrs.module.imaging.api.OrthancConfigurationService;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
 import org.openmrs.module.imaging.api.RequestProcedureService;
 import org.openmrs.module.imaging.api.RequestProcedureStepService;
 import org.openmrs.module.imaging.api.study.DicomStudy;
@@ -634,35 +630,5 @@ public class RequestProcedureController {
 		}catch (IOException e) {
 			return new ResponseEntity<>("", HttpStatus.INTERNAL_SERVER_ERROR);
 		}
-	}
-	
-	private void createFhirServiceRequest(String patientUuid, String description, String accessionNumber) throws Exception {
-		// Generic radiology concept UUID - maps to Odoo radiology product
-		String conceptUuid = "e3dea2c8-62c6-4487-bdaa-1d009642f7ad";
-		
-		String fhirPayload = "{" + "\"resourceType\":\"ServiceRequest\"," + "\"status\":\"active\","
-		        + "\"intent\":\"order\"," + "\"category\":[{\"coding\":[{\"system\":\"http://snomed.info/sct\","
-		        + "\"code\":\"363679005\",\"display\":\"Imaging\"}]}]," + "\"code\":{\"coding\":[{\"code\":\"" + conceptUuid
-		        + "\"}]," + "\"text\":\"" + (description != null ? description.replace("\"", "'") : "Radiology") + "\"},"
-		        + "\"subject\":{\"reference\":\"Patient/" + patientUuid + "\"}," + "\"identifier\":[{\"value\":\""
-		        + (accessionNumber != null ? accessionNumber : "") + "\"}]" + "}";
-		
-		URL url = new URL("http://localhost:8080/openmrs/ws/fhir2/R4/ServiceRequest");
-		HttpURLConnection con = (HttpURLConnection) url.openConnection();
-		con.setRequestMethod("POST");
-		con.setRequestProperty("Content-Type", "application/fhir+json");
-		con.setRequestProperty("Accept", "application/fhir+json");
-		con.setRequestProperty("Authorization",
-		    "Basic " + Base64.getEncoder().encodeToString("admin:Admin123".getBytes(StandardCharsets.UTF_8)));
-		con.setDoOutput(true);
-		con.getOutputStream().write(fhirPayload.getBytes(StandardCharsets.UTF_8));
-		
-		int status = con.getResponseCode();
-		if (status == 200 || status == 201) {
-			log.info("Created FHIR ServiceRequest for patient " + patientUuid + " accession " + accessionNumber);
-		} else {
-			log.warn("FHIR ServiceRequest creation returned status " + status);
-		}
-		con.disconnect();
 	}
 }
